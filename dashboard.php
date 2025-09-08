@@ -6,6 +6,46 @@ include 'db.php';
 // Get total students count from database
 $student_count_result = $conn->query("SELECT COUNT(*) as total FROM students");
 $student_count = $student_count_result->fetch_assoc()['total'];
+
+// Get active violations count
+$active_violations_result = $conn->query("SELECT COUNT(*) as total FROM violations WHERE status = 'Active'");
+$active_violations_count = $active_violations_result->fetch_assoc()['total'];
+
+// Get violation statistics by category
+$violation_stats_query = "SELECT violation_category, COUNT(*) as count FROM violations WHERE status = 'Active' GROUP BY violation_category";
+$violation_stats_result = $conn->query($violation_stats_query);
+$violation_stats = [];
+while ($row = $violation_stats_result->fetch_assoc()) {
+    $violation_stats[$row['violation_category']] = $row['count'];
+}
+
+// Set default values if no violations exist
+$minor_count = isset($violation_stats['Minor']) ? $violation_stats['Minor'] : 0;
+$serious_count = isset($violation_stats['Serious']) ? $violation_stats['Serious'] : 0;
+$major_count = isset($violation_stats['Major']) ? $violation_stats['Major'] : 0;
+
+// Get recent activity (violations and attendance)
+$recent_activity_query = "
+    SELECT 'violation' as type, v.student_id, s.name, v.violation_type as activity, 
+           v.violation_date as activity_time, v.status
+    FROM violations v 
+    JOIN students s ON v.student_id = s.student_id 
+    WHERE v.violation_date >= DATE_SUB(NOW(), INTERVAL 1 DAY)
+    
+    UNION ALL
+    
+    SELECT 'attendance' as type, a.student_id, s.name, 
+           CONCAT('Attendance Check-in (', a.status, ')') as activity,
+           TIMESTAMP(a.attendance_date, '09:00:00') as activity_time, 
+           CASE WHEN a.status = 'Present' THEN 'Complete' ELSE 'Pending' END as status
+    FROM attendance a 
+    JOIN students s ON a.student_id = s.student_id 
+    WHERE a.attendance_date >= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+    
+    ORDER BY activity_time DESC 
+    LIMIT 10";
+
+$recent_activity_result = $conn->query($recent_activity_query);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -97,7 +137,7 @@ $student_count = $student_count_result->fetch_assoc()['total'];
                 
                 <div class="stat-card">
                     <div class="stat-header">Active Violations</div>
-                    <div class="stat-number">23</div>
+                    <div class="stat-number"><?php echo number_format($active_violations_count); ?></div>
                     <div class="stat-icon">⚠️</div>
                 </div>
             </div>
@@ -115,30 +155,28 @@ $student_count = $student_count_result->fetch_assoc()['total'];
                             </tr>
                         </thead>
                         <tbody>
-                            <tr>
-                                <td>09:15 AM</td>
-                                <td>John Doe (2023-001)</td>
-                                <td>Attendance Check-in</td>
-                                <td><span class="status-badge status-active">Complete</span></td>
-                            </tr>
-                            <tr>
-                                <td>09:12 AM</td>
-                                <td>Jane Smith (2023-002)</td>
-                                <td>Uniform Violation</td>
-                                <td><span class="status-badge status-pending">Pending</span></td>
-                            </tr>
-                            <tr>
-                                <td>09:10 AM</td>
-                                <td>Mike Johnson (2023-003)</td>
-                                <td>Attendance Check-in</td>
-                                <td><span class="status-badge status-active">Complete</span></td>
-                            </tr>
-                            <tr>
-                                <td>09:08 AM</td>
-                                <td>Sarah Wilson (2023-004)</td>
-                                <td>Late Arrival</td>
-                                <td><span class="status-badge status-resolved">Resolved</span></td>
-                            </tr>
+                            <?php if ($recent_activity_result->num_rows > 0): ?>
+                                <?php while($row = $recent_activity_result->fetch_assoc()): ?>
+                                <tr>
+                                    <td><?php echo date('h:i A', strtotime($row['activity_time'])); ?></td>
+                                    <td><?php echo htmlspecialchars($row['name']) . ' (' . htmlspecialchars($row['student_id']) . ')'; ?></td>
+                                    <td><?php echo htmlspecialchars($row['activity']); ?></td>
+                                    <td>
+                                        <span class="status-badge status-<?php 
+                                            echo $row['type'] === 'violation' ? 
+                                                ($row['status'] === 'Active' ? 'pending' : 'resolved') : 
+                                                ($row['status'] === 'Complete' ? 'active' : 'pending'); 
+                                        ?>">
+                                            <?php echo htmlspecialchars($row['status']); ?>
+                                        </span>
+                                    </td>
+                                </tr>
+                                <?php endwhile; ?>
+                            <?php else: ?>
+                                <tr>
+                                    <td colspan="4" style="text-align: center; color: #64748b;">No recent activity</td>
+                                </tr>
+                            <?php endif; ?>
                         </tbody>
                     </table>
                 </div>
@@ -146,19 +184,19 @@ $student_count = $student_count_result->fetch_assoc()['total'];
                 <div class="chart-section">
                     <div class="section-header">Violation Types</div>
                     <div style="display: flex; flex-direction: column; align-items: center;">
-                        <div class="donut-chart"></div>
+                        <div class="donut-chart" id="violationChart"></div>
                         <div class="legend">
                             <div class="legend-item">
                                 <div class="legend-color color-minor"></div>
-                                <span>Minor Offenses</span>
+                                <span>Minor Offenses (<?php echo $minor_count; ?>)</span>
                             </div>
                             <div class="legend-item">
                                 <div class="legend-color color-serious"></div>
-                                <span>Serious Offenses</span>
+                                <span>Serious Offenses (<?php echo $serious_count; ?>)</span>
                             </div>
                             <div class="legend-item">
                                 <div class="legend-color color-major"></div>
-                                <span>Major Offenses</span>
+                                <span>Major Offenses (<?php echo $major_count; ?>)</span>
                             </div>
                         </div>
                     </div>
@@ -205,6 +243,39 @@ $student_count = $student_count_result->fetch_assoc()['total'];
 
     <!-- External JavaScript -->
     <script>
+        // Violation statistics data from PHP
+        const violationStats = {
+            minor: <?php echo $minor_count; ?>,
+            serious: <?php echo $serious_count; ?>,
+            major: <?php echo $major_count; ?>
+        };
+
+        // Update donut chart based on actual data
+        function updateViolationChart() {
+            const chart = document.getElementById('violationChart');
+            const total = violationStats.minor + violationStats.serious + violationStats.major;
+            
+            if (total === 0) {
+                chart.style.background = '#e5e7eb';
+                return;
+            }
+            
+            const minorPercent = (violationStats.minor / total) * 100;
+            const seriousPercent = (violationStats.serious / total) * 100;
+            const majorPercent = (violationStats.major / total) * 100;
+            
+            const minorEnd = minorPercent;
+            const seriousEnd = minorPercent + seriousPercent;
+            const majorEnd = seriousEnd + majorPercent;
+            
+            chart.style.background = `conic-gradient(
+                #10b981 0% ${minorEnd}%, 
+                #f59e0b ${minorEnd}% ${seriousEnd}%, 
+                #ef4444 ${seriousEnd}% ${majorEnd}%,
+                #e5e7eb ${majorEnd}% 100%
+            )`;
+        }
+
         // Calendar functionality
         class CalendarSystem {
             constructor() {
@@ -426,6 +497,68 @@ $student_count = $student_count_result->fetch_assoc()['total'];
             });
         });
 
+        // Auto-refresh functions
+        function refreshDashboardData() {
+            fetch('dashboard_api.php?action=get_stats')
+                .then(response => response.json())
+                .then(data => {
+                    // Update stats
+                    document.querySelector('.stat-card .stat-number').textContent = data.total_students.toLocaleString();
+                    document.querySelectorAll('.stat-card .stat-number')[1].textContent = data.active_violations.toLocaleString();
+                    
+                    // Update violation breakdown
+                    violationStats.minor = data.violation_breakdown.Minor;
+                    violationStats.serious = data.violation_breakdown.Serious;
+                    violationStats.major = data.violation_breakdown.Major;
+                    
+                    // Update legend with counts
+                    const legendItems = document.querySelectorAll('.legend-item span');
+                    legendItems[0].textContent = `Minor Offenses (${data.violation_breakdown.Minor})`;
+                    legendItems[1].textContent = `Serious Offenses (${data.violation_breakdown.Serious})`;
+                    legendItems[2].textContent = `Major Offenses (${data.violation_breakdown.Major})`;
+                    
+                    // Update chart
+                    updateViolationChart();
+                })
+                .catch(error => console.error('Error refreshing stats:', error));
+        }
+
+        function refreshRecentActivity() {
+            fetch('dashboard_api.php?action=get_recent_activity')
+                .then(response => response.json())
+                .then(data => {
+                    const tbody = document.querySelector('.activity-table tbody');
+                    tbody.innerHTML = '';
+                    
+                    if (data.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: #64748b;">No recent activity</td></tr>';
+                        return;
+                    }
+                    
+                    data.forEach(activity => {
+                        const row = document.createElement('tr');
+                        
+                        // Determine status class
+                        let statusClass = 'pending';
+                        if (activity.type === 'violation') {
+                            statusClass = activity.status === 'Active' ? 'pending' : 'resolved';
+                        } else {
+                            statusClass = activity.status === 'Complete' ? 'active' : 'pending';
+                        }
+                        
+                        row.innerHTML = `
+                            <td>${activity.time}</td>
+                            <td>${activity.student_name} (${activity.student_id})</td>
+                            <td>${activity.activity}</td>
+                            <td><span class="status-badge status-${statusClass}">${activity.status}</span></td>
+                        `;
+                        
+                        tbody.appendChild(row);
+                    });
+                })
+                .catch(error => console.error('Error refreshing activity:', error));
+        }
+
         // Initialize the application when DOM is loaded
         document.addEventListener('DOMContentLoaded', function() {
             const activePage = document.querySelector('.page.active');
@@ -435,6 +568,31 @@ $student_count = $student_count_result->fetch_assoc()['total'];
             
             // Initialize calendar
             new CalendarSystem();
+            
+            // Update violation chart
+            updateViolationChart();
+            
+            // Set up auto-refresh (every 30 seconds)
+            setInterval(refreshDashboardData, 30000);
+            setInterval(refreshRecentActivity, 15000);
+            
+            // Add manual refresh button functionality
+            const refreshBtn = document.createElement('button');
+            refreshBtn.textContent = '🔄 Refresh';
+            refreshBtn.className = 'btn btn-secondary';
+            refreshBtn.style.position = 'fixed';
+            refreshBtn.style.top = '20px';
+            refreshBtn.style.right = '20px';
+            refreshBtn.style.zIndex = '1001';
+            refreshBtn.addEventListener('click', function() {
+                refreshDashboardData();
+                refreshRecentActivity();
+                this.textContent = '✅ Updated';
+                setTimeout(() => {
+                    this.textContent = '🔄 Refresh';
+                }, 2000);
+            });
+            document.body.appendChild(refreshBtn);
         });
 
         // Keyboard navigation
