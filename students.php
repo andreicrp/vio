@@ -1,7 +1,36 @@
 <?php
 // students.php
-// VIOTRACK System - Students Page
+// VIOTRACK System - Students Page with QR Code Generation
 include 'db.php';
+
+// Function to generate QR code using online API
+function generateQRCode($student_id, $base_url) {
+    $violation_url = $base_url . "/violationss.php?student_id=" . urlencode($student_id);
+    $qr_api_url = "https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=" . urlencode($violation_url);
+    return $qr_api_url;
+}
+
+// Get base URL
+$protocol = isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http";
+$base_url = $protocol . "://" . $_SERVER['HTTP_HOST'] . dirname($_SERVER['REQUEST_URI']);
+
+// Handle QR Code Regeneration Only
+if (isset($_POST['regenerate_qr_only'])) {
+    $id = $_POST['id'];
+    $student_id = $_POST['student_id'];
+    
+    // Generate new QR code
+    $qr_code_url = generateQRCode($student_id, $base_url);
+    
+    $sql = "UPDATE students SET qr_code='$qr_code_url' WHERE id='$id'";
+    
+    if ($conn->query($sql)) {
+        header("Location: students.php?message=" . urlencode("QR code regenerated successfully"));
+        exit();
+    } else {
+        $error = "Error regenerating QR code: " . $conn->error;
+    }
+}
 
 // Handle Delete Student
 if (isset($_GET['delete'])) {
@@ -20,12 +49,15 @@ if (isset($_POST['add_student'])) {
     $grade      = $_POST['grade'];
     $section    = $_POST['section'];
     $status     = $_POST['status'];
+    
+    // Generate QR code URL
+    $qr_code_url = generateQRCode($student_id, $base_url);
 
-    $sql = "INSERT INTO students (student_id, name, grade, section, status) 
-            VALUES ('$student_id', '$name', '$grade', '$section', '$status')";
+    $sql = "INSERT INTO students (student_id, name, grade, section, status, qr_code) 
+            VALUES ('$student_id', '$name', '$grade', '$section', '$status', '$qr_code_url')";
     
     if ($conn->query($sql)) {
-        header("Location: students.php?message=Student added successfully");
+        header("Location: students.php?message=Student added successfully with QR code generated");
         exit();
     } else {
         $error = "Error: " . $conn->error;
@@ -41,7 +73,10 @@ if (isset($_POST['update_student'])) {
     $section = $_POST['section'];
     $status = $_POST['status'];
 
-    $sql = "UPDATE students SET student_id='$student_id', name='$name', grade='$grade', section='$section', status='$status' WHERE id='$id'";
+    // Regenerate QR code URL
+    $qr_code_url = generateQRCode($student_id, $base_url);
+
+    $sql = "UPDATE students SET student_id='$student_id', name='$name', grade='$grade', section='$section', status='$status', qr_code='$qr_code_url' WHERE id='$id'";
     
     if ($conn->query($sql)) {
         header("Location: students.php?message=Student updated successfully");
@@ -88,12 +123,14 @@ if (isset($_GET['edit'])) {
     
     .modal-content {
         background-color: #fefefe;
-        margin: 10% auto;
+        margin: 5% auto;
         padding: 20px;
         border: none;
         border-radius: 8px;
-        width: 500px;
+        width: 600px;
         max-width: 90%;
+        max-height: 80vh;
+        overflow-y: auto;
     }
     
     .close {
@@ -156,6 +193,67 @@ if (isset($_GET['edit'])) {
     
     .btn-danger:hover {
         background-color: #c82333;
+    }
+    
+    .qr-code-container {
+        text-align: center;
+        margin: 15px 0;
+        padding: 15px;
+        background: #f8f9fa;
+        border-radius: 8px;
+        border: 1px solid #dee2e6;
+    }
+    
+    .qr-code-img {
+        max-width: 150px;
+        height: auto;
+        border: 2px solid #007bff;
+        border-radius: 8px;
+    }
+    
+    .qr-code-label {
+        font-weight: bold;
+        margin-bottom: 10px;
+        color: #495057;
+    }
+    
+    .qr-code-url {
+        font-size: 12px;
+        color: #6c757d;
+        margin-top: 8px;
+        word-break: break-all;
+    }
+    
+    .view-modal .modal-content {
+        width: 500px;
+    }
+    
+    .student-details {
+        background: #f8f9fa;
+        padding: 20px;
+        border-radius: 8px;
+        margin-bottom: 20px;
+    }
+    
+    .student-details h3 {
+        margin-bottom: 15px;
+        color: #343a40;
+    }
+    
+    .detail-row {
+        display: flex;
+        margin-bottom: 10px;
+    }
+    
+    .detail-label {
+        font-weight: bold;
+        width: 100px;
+        color: #495057;
+    }
+    
+    .detail-value {
+        flex: 1;
+        color: #212529;
     }
   </style>
 </head>
@@ -261,6 +359,7 @@ if (isset($_GET['edit'])) {
                                 <th>Grade</th>
                                 <th>Section</th>
                                 <th>Status</th>
+                                <th>QR Code</th>
                                 <th>Actions</th>
                             </tr>
                         </thead>
@@ -278,7 +377,14 @@ if (isset($_GET['edit'])) {
                                         </span>
                                     </td>
                                     <td>
-                                        <button class="btn btn-primary" onclick="viewStudent(<?php echo $row['id']; ?>)">View</button>
+                                        <?php if (!empty($row['qr_code'])): ?>
+                                            <img src="<?php echo htmlspecialchars($row['qr_code']); ?>" alt="QR Code" style="width: 50px; height: 50px; border: 1px solid #ddd; border-radius: 4px;">
+                                        <?php else: ?>
+                                            <span style="color: #999;">No QR</span>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td>
+                                        <button class="btn btn-primary" onclick="viewStudent(<?php echo $row['id']; ?>, '<?php echo htmlspecialchars($row['student_id']); ?>', '<?php echo htmlspecialchars($row['name']); ?>', '<?php echo htmlspecialchars($row['grade']); ?>', '<?php echo htmlspecialchars($row['section']); ?>', '<?php echo htmlspecialchars($row['status']); ?>', '<?php echo htmlspecialchars($row['qr_code']); ?>')">View</button>
                                         <a href="?edit=<?php echo $row['id']; ?>" class="btn btn-secondary">Edit</a>
                                         <button class="btn btn-danger" onclick="deleteStudent(<?php echo $row['id']; ?>, '<?php echo htmlspecialchars($row['name']); ?>')">Delete</button>
                                     </td>
@@ -286,7 +392,7 @@ if (isset($_GET['edit'])) {
                                 <?php endwhile; ?>
                             <?php else: ?>
                                 <tr>
-                                    <td colspan="6" style="text-align: center;">No students found</td>
+                                    <td colspan="7" style="text-align: center;">No students found</td>
                                 </tr>
                             <?php endif; ?>
                         </tbody>
@@ -300,7 +406,7 @@ if (isset($_GET['edit'])) {
       </div>
   </div>
 
-  <!-- Add Student Modal -->
+  <!-- Add/Edit Student Modal -->
   <div id="addModal" class="modal">
       <div class="modal-content">
           <span class="close" onclick="closeAddModal()">&times;</span>
@@ -350,6 +456,14 @@ if (isset($_GET['edit'])) {
                   </select>
               </div>
               
+              <?php if ($edit_student && !empty($edit_student['qr_code'])): ?>
+              <div class="qr-code-container">
+                  <div class="qr-code-label">Current QR Code:</div>
+                  <img src="<?php echo htmlspecialchars($edit_student['qr_code']); ?>" alt="Student QR Code" class="qr-code-img">
+                  <div class="qr-code-url">QR Code will be regenerated upon update</div>
+              </div>
+              <?php endif; ?>
+              
               <div class="form-group">
                   <button type="submit" name="<?php echo $edit_student ? 'update_student' : 'add_student'; ?>" class="btn btn-primary">
                       <?php echo $edit_student ? 'Update Student' : 'Add Student'; ?>
@@ -357,6 +471,17 @@ if (isset($_GET['edit'])) {
                   <button type="button" class="btn btn-secondary" onclick="closeAddModal()">Cancel</button>
               </div>
           </form>
+      </div>
+  </div>
+
+  <!-- View Student Modal -->
+  <div id="viewModal" class="modal view-modal">
+      <div class="modal-content">
+          <span class="close" onclick="closeViewModal()">&times;</span>
+          <h2>Student Details</h2>
+          <div id="studentDetailsContent">
+              <!-- Content will be populated by JavaScript -->
+          </div>
       </div>
   </div>
 
@@ -370,6 +495,10 @@ if (isset($_GET['edit'])) {
             document.getElementById('addModal').style.display = 'none';
         }
 
+        function closeViewModal() {
+            document.getElementById('viewModal').style.display = 'none';
+        }
+
         // Show edit modal if editing
         <?php if ($edit_student): ?>
         document.addEventListener('DOMContentLoaded', function() {
@@ -379,93 +508,130 @@ if (isset($_GET['edit'])) {
 
         // Delete student function
         function deleteStudent(id, name) {
-            if (confirm('Are you sure you want to delete student: ' + name + '?')) {
+            if (confirm('Are you sure you want to delete student: ' + name + '?\n\nThis will also delete all associated violations and attendance records.')) {
                 window.location.href = '?delete=' + id;
             }
         }
 
         // View student function
-        function viewStudent(id) {
-            alert('View student functionality - Student ID: ' + id);
-            // You can implement a view modal or redirect to a detailed page
+        function viewStudent(id, studentId, name, grade, section, status, qrCode) {
+            const detailsContent = document.getElementById('studentDetailsContent');
+            
+            let qrCodeHtml = '';
+            if (qrCode && qrCode !== '') {
+                qrCodeHtml = `
+                    <div class="qr-code-container">
+                        <div class="qr-code-label">Student QR Code:</div>
+                        <img src="${qrCode}" alt="Student QR Code" class="qr-code-img">
+                        <div class="qr-code-url">Scan this QR code to access violation tracker</div>
+                        <button class="btn btn-secondary" onclick="downloadQR('${qrCode}', '${studentId}')">Download QR Code</button>
+                    </div>
+                `;
+            }
+            
+            detailsContent.innerHTML = `
+                <div class="student-details">
+                    <h3>Personal Information</h3>
+                    <div class="detail-row">
+                        <span class="detail-label">Student ID:</span>
+                        <span class="detail-value">${studentId}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Name:</span>
+                        <span class="detail-value">${name}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Grade:</span>
+                        <span class="detail-value">${grade}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Section:</span>
+                        <span class="detail-value">${section}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Status:</span>
+                        <span class="detail-value"><span class="status-badge status-${status.toLowerCase()}">${status}</span></span>
+                    </div>
+                </div>
+                ${qrCodeHtml}
+                <div class="action-buttons">
+                    <button class="btn btn-primary" onclick="openViolationTracker('${studentId}')">Open Violation Tracker</button>
+                    <button class="btn btn-secondary" onclick="printStudentCard('${studentId}', '${name}', '${grade}', '${section}', '${qrCode}')">Print Student Card</button>
+                </div>
+            `;
+            
+            document.getElementById('viewModal').style.display = 'block';
+        }
+
+        // Open violation tracker
+        function openViolationTracker(studentId) {
+            const url = `violationss.php?student_id=${encodeURIComponent(studentId)}`;
+            window.open(url, '_blank');
+        }
+
+        // Download QR Code
+        function downloadQR(qrUrl, studentId) {
+            const link = document.createElement('a');
+            link.href = qrUrl;
+            link.download = `qr_code_${studentId}.png`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        // Print student card
+        function printStudentCard(studentId, name, grade, section, qrCode) {
+            const printWindow = window.open('', '_blank');
+            const printContent = `
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Student Card - ${studentId}</title>
+                    <style>
+                        body { font-family: Arial, sans-serif; padding: 20px; }
+                        .card { border: 2px solid #000; padding: 20px; width: 300px; margin: 0 auto; text-align: center; }
+                        .qr { margin: 10px 0; }
+                        h2 { margin: 0 0 20px 0; }
+                        .info { text-align: left; margin: 20px 0; }
+                    </style>
+                </head>
+                <body>
+                    <div class="card">
+                        <h2>VIOTRACK Student Card</h2>
+                        <div class="info">
+                            <strong>Name:</strong> ${name}<br>
+                            <strong>ID:</strong> ${studentId}<br>
+                            <strong>Grade:</strong> ${grade}<br>
+                            <strong>Section:</strong> ${section}
+                        </div>
+                        ${qrCode ? `<div class="qr"><img src="${qrCode}" alt="QR Code" style="width: 150px; height: 150px;"></div>` : ''}
+                        <p><small>Scan QR code for violation tracking</small></p>
+                    </div>
+                </body>
+                </html>
+            `;
+            
+            printWindow.document.write(printContent);
+            printWindow.document.close();
+            printWindow.print();
         }
 
         // Export data function
         function exportData() {
             alert('Export functionality will be implemented here');
-            // You can implement CSV/PDF export here
         }
 
         // Close modal when clicking outside
         window.onclick = function(event) {
-            const modal = document.getElementById('addModal');
-            if (event.target == modal) {
+            const addModal = document.getElementById('addModal');
+            const viewModal = document.getElementById('viewModal');
+            if (event.target == addModal) {
                 closeAddModal();
             }
-        }
-
-        // Navigation system
-        function showPage(pageId) {
-            document.querySelectorAll('.page').forEach(page => {
-                page.classList.remove('active');
-            });
-            
-            document.getElementById(pageId).classList.add('active');
-            
-            document.querySelectorAll('.menu-item').forEach(item => {
-                item.classList.remove('active');
-            });
-            
-            document.querySelector(`[data-page="${pageId}"]`).classList.add('active');
-            
-            const pageTitles = {
-                dashboard: 'VIOTRACK',
-                students: 'Student Management - PHC',
-                violations: 'Violation Management - PHC',
-                track: 'Track Location - PHC',
-                reports: 'Reports & Analytics - PHC'
-            };
-            
-            document.title = pageTitles[pageId] || 'PHC System';
-        }
-
-        // Add click event listeners to menu items
-        document.querySelectorAll('.menu-item').forEach(item => {
-            item.addEventListener('click', function() {
-                const pageId = this.getAttribute('data-page');
-                if (pageId) {
-                    showPage(pageId);
-                    window.scrollTo({ top: 0, behavior: 'smooth' });
-                }
-            });
-        });
-
-        // Initialize the application when DOM is loaded
-        document.addEventListener('DOMContentLoaded', function() {
-            const activePage = document.querySelector('.page.active');
-            if (!activePage) {
-                showPage('dashboard');
+            if (event.target == viewModal) {
+                closeViewModal();
             }
-        });
-
-        // Keyboard navigation
-        document.addEventListener('keydown', function(e) {
-            const menuItems = document.querySelectorAll('.menu-item');
-            const currentActive = document.querySelector('.menu-item.active');
-            const currentIndex = Array.from(menuItems).indexOf(currentActive);
-            
-            if (e.key === 'ArrowDown' && currentIndex < menuItems.length - 1) {
-                e.preventDefault();
-                const nextItem = menuItems[currentIndex + 1];
-                const pageId = nextItem.getAttribute('data-page');
-                showPage(pageId);
-            } else if (e.key === 'ArrowUp' && currentIndex > 0) {
-                e.preventDefault();
-                const prevItem = menuItems[currentIndex - 1];
-                const pageId = prevItem.getAttribute('data-page');
-                showPage(pageId);
-            }
-        });
+        }
     </script>
 </body>
 </html>
