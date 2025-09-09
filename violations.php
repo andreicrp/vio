@@ -1,14 +1,420 @@
 <?php
 // violations.php
-// VIOTRACK System - Violations Page
+// VIOTRACK System - Enhanced Violations Page with Active Data
+include 'db.php';
+
+// Handle AJAX requests
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    header('Content-Type: application/json');
+    
+    $action = $_POST['action'] ?? '';
+    
+    if ($action === 'get_violations') {
+        $search = $_POST['search'] ?? '';
+        $status_filter = $_POST['status'] ?? '';
+        
+        $sql = "SELECT v.*, s.name as student_name 
+                FROM violations v 
+                JOIN students s ON v.student_id = s.student_id";
+        
+        $conditions = [];
+        $params = [];
+        
+        if (!empty($search)) {
+            $conditions[] = "(s.name LIKE ? OR v.violation_type LIKE ? OR v.student_id LIKE ?)";
+            $searchParam = "%$search%";
+            $params = array_merge($params, [$searchParam, $searchParam, $searchParam]);
+        }
+        
+        if (!empty($status_filter)) {
+            $conditions[] = "v.status = ?";
+            $params[] = $status_filter;
+        }
+        
+        if (!empty($conditions)) {
+            $sql .= " WHERE " . implode(" AND ", $conditions);
+        }
+        
+        $sql .= " ORDER BY v.violation_date DESC";
+        
+        $stmt = $conn->prepare($sql);
+        if (!empty($params)) {
+            $types = str_repeat('s', count($params));
+            $stmt->bind_param($types, ...$params);
+        }
+        
+        $stmt->execute();
+        $result = $stmt->get_result();
+        
+        $violations = [];
+        while ($row = $result->fetch_assoc()) {
+            $violations[] = $row;
+        }
+        
+        echo json_encode($violations);
+        exit;
+    }
+    
+    if ($action === 'resolve_violation') {
+        $violation_id = $_POST['violation_id'];
+        $resolved_by = $_POST['resolved_by'] ?? 'System';
+        $notes = $_POST['notes'] ?? '';
+        
+        $sql = "UPDATE violations SET 
+                status = 'Resolved', 
+                resolved_by = ?, 
+                resolved_date = NOW(),
+                notes = CONCAT(COALESCE(notes, ''), '\n[RESOLVED] ', ?)
+                WHERE id = ?";
+        
+        $stmt = $conn->prepare($sql);
+        $stmt->bind_param("ssi", $resolved_by, $notes, $violation_id);
+        
+        echo json_encode(['success' => $stmt->execute()]);
+        exit;
+    }
+    
+    if ($action === 'add_violation') {
+        $student_id = $_POST['student_id'];
+        $violation_type = $_POST['violation_type'];
+        $category = $_POST['category'];
+        $description = $_POST['description'];
+        $recorded_by = $_POST['recorded_by'];
+        
+        $sql = "INSERT INTO violations (student_id, violation_type, violation_category, notes, recorded_by) 
+                VALUES (?, ?, ?, ?, ?)";
+        
+        $stmt = $conn->prepare($sql);
+        $stmt->bind_param("sssss", $student_id, $violation_type, $category, $description, $recorded_by);
+        
+        echo json_encode(['success' => $stmt->execute()]);
+        exit;
+    }
+    
+    if ($action === 'get_report_data') {
+        $start_date = $_POST['start_date'] ?? date('Y-m-01');
+        $end_date = $_POST['end_date'] ?? date('Y-m-t');
+        
+        // Get violation statistics
+        $stats_sql = "SELECT 
+                        COUNT(*) as total_violations,
+                        SUM(CASE WHEN status = 'Active' THEN 1 ELSE 0 END) as active_violations,
+                        SUM(CASE WHEN status = 'Resolved' THEN 1 ELSE 0 END) as resolved_violations,
+                        SUM(CASE WHEN violation_category = 'Minor' THEN 1 ELSE 0 END) as minor_violations,
+                        SUM(CASE WHEN violation_category = 'Serious' THEN 1 ELSE 0 END) as serious_violations,
+                        SUM(CASE WHEN violation_category = 'Major' THEN 1 ELSE 0 END) as major_violations
+                      FROM violations 
+                      WHERE violation_date BETWEEN ? AND ?";
+        
+        $stmt = $conn->prepare($stats_sql);
+        $stmt->bind_param("ss", $start_date, $end_date);
+        $stmt->execute();
+        $stats = $stmt->get_result()->fetch_assoc();
+        
+        // Get top violators
+        $top_sql = "SELECT s.name, s.student_id, COUNT(*) as violation_count
+                    FROM violations v
+                    JOIN students s ON v.student_id = s.student_id
+                    WHERE v.violation_date BETWEEN ? AND ?
+                    GROUP BY v.student_id
+                    ORDER BY violation_count DESC
+                    LIMIT 10";
+        
+        $stmt = $conn->prepare($top_sql);
+        $stmt->bind_param("ss", $start_date, $end_date);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        
+        $top_violators = [];
+        while ($row = $result->fetch_assoc()) {
+            $top_violators[] = $row;
+        }
+        
+        echo json_encode([
+            'stats' => $stats,
+            'top_violators' => $top_violators
+        ]);
+        exit;
+    }
+}
+
+// Get initial violation data
+$violations_query = "SELECT v.*, s.name as student_name 
+                     FROM violations v 
+                     JOIN students s ON v.student_id = s.student_id 
+                     ORDER BY v.violation_date DESC 
+                     LIMIT 20";
+$violations_result = $conn->query($violations_query);
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>VIOTRACK - Violations</title>
+  <title>VIOTRACK - Violations Management</title>
   <link rel="stylesheet" href="styles.css">
+  <style>
+    .violation-form-modal {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.5);
+        display: none;
+        justify-content: center;
+        align-items: center;
+        z-index: 2000;
+    }
+    
+    .violation-form-modal.show {
+        display: flex;
+    }
+    
+    .modal-content {
+        background: white;
+        padding: 30px;
+        border-radius: 12px;
+        width: 90%;
+        max-width: 600px;
+        max-height: 90vh;
+        overflow-y: auto;
+        box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+    }
+    
+    .modal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+        padding-bottom: 15px;
+        border-bottom: 2px solid #f1f5f9;
+    }
+    
+    .modal-title {
+        font-size: 24px;
+        font-weight: 600;
+        color: #1e293b;
+    }
+    
+    .modal-close {
+        background: none;
+        border: none;
+        font-size: 24px;
+        cursor: pointer;
+        color: #64748b;
+        padding: 5px;
+    }
+    
+    .form-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 15px;
+        margin-bottom: 20px;
+    }
+    
+    .form-group {
+        margin-bottom: 15px;
+    }
+    
+    .form-group.full-width {
+        grid-column: 1 / -1;
+    }
+    
+    .form-group label {
+        display: block;
+        margin-bottom: 5px;
+        font-weight: 500;
+        color: #374151;
+    }
+    
+    .form-group input,
+    .form-group textarea,
+    .form-group select {
+        width: 100%;
+        padding: 10px 12px;
+        border: 2px solid #e2e8f0;
+        border-radius: 6px;
+        font-size: 14px;
+        transition: border-color 0.3s ease;
+        box-sizing: border-box;
+    }
+    
+    .form-group input:focus,
+    .form-group textarea:focus,
+    .form-group select:focus {
+        outline: none;
+        border-color: #3b82f6;
+    }
+    
+    .form-group textarea {
+        resize: vertical;
+        min-height: 80px;
+    }
+    
+    .modal-actions {
+        display: flex;
+        gap: 10px;
+        justify-content: flex-end;
+        margin-top: 25px;
+        padding-top: 20px;
+        border-top: 1px solid #e5e7eb;
+    }
+    
+    .btn-modal {
+        padding: 10px 20px;
+        border: none;
+        border-radius: 6px;
+        font-size: 14px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.3s ease;
+    }
+    
+    .btn-save {
+        background: #3b82f6;
+        color: white;
+    }
+    
+    .btn-save:hover {
+        background: #2563eb;
+        transform: translateY(-1px);
+    }
+    
+    .btn-cancel {
+        background: #6b7280;
+        color: white;
+    }
+    
+    .btn-cancel:hover {
+        background: #4b5563;
+        transform: translateY(-1px);
+    }
+    
+    .filters-section {
+        background: #f8fafc;
+        padding: 20px;
+        border-radius: 8px;
+        margin-bottom: 20px;
+        display: flex;
+        gap: 15px;
+        align-items: center;
+        flex-wrap: wrap;
+    }
+    
+    .filter-group {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+    }
+    
+    .filter-group label {
+        font-size: 12px;
+        font-weight: 500;
+        color: #64748b;
+        text-transform: uppercase;
+    }
+    
+    .filter-group select,
+    .filter-group input {
+        padding: 8px 12px;
+        border: 1px solid #d1d5db;
+        border-radius: 4px;
+        font-size: 14px;
+    }
+    
+    .loading {
+        text-align: center;
+        padding: 40px;
+        color: #64748b;
+    }
+    
+    .violation-actions {
+        display: flex;
+        gap: 5px;
+    }
+    
+    .btn-small {
+        padding: 4px 8px;
+        font-size: 12px;
+        border-radius: 4px;
+    }
+    
+    .btn-resolve {
+        background: #10b981;
+        color: white;
+        border: none;
+        cursor: pointer;
+        transition: background 0.3s ease;
+    }
+    
+    .btn-resolve:hover {
+        background: #059669;
+    }
+    
+    .btn-view {
+        background: #3b82f6;
+        color: white;
+        border: none;
+        cursor: pointer;
+        transition: background 0.3s ease;
+    }
+    
+    .btn-view:hover {
+        background: #2563eb;
+    }
+    
+    .stats-cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 15px;
+        margin-bottom: 25px;
+    }
+    
+    .stat-card-small {
+        background: white;
+        padding: 15px;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        text-align: center;
+    }
+    
+    .stat-number-small {
+        font-size: 24px;
+        font-weight: bold;
+        margin-bottom: 5px;
+    }
+    
+    .stat-label-small {
+        font-size: 12px;
+        color: #64748b;
+        text-transform: uppercase;
+    }
+    
+    .report-section {
+        background: white;
+        padding: 25px;
+        border-radius: 12px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+        margin-top: 25px;
+    }
+    
+    @media (max-width: 768px) {
+        .form-grid {
+            grid-template-columns: 1fr;
+        }
+        
+        .filters-section {
+            flex-direction: column;
+            align-items: stretch;
+        }
+        
+        .modal-content {
+            margin: 10px;
+            width: calc(100% - 20px);
+        }
+    }
+  </style>
 </head>
 <body>
   <div class="menu-container">
@@ -80,69 +486,576 @@
   <div class="main-content">
       <div id="violations" class="page active">
           <h1 class="page-header">Violation Management</h1>
+          
+          <!-- Statistics Cards -->
+          <div class="stats-cards" id="statsCards">
+              <div class="stat-card-small">
+                  <div class="stat-number-small" id="totalViolations">0</div>
+                  <div class="stat-label-small">Total Violations</div>
+              </div>
+              <div class="stat-card-small">
+                  <div class="stat-number-small" id="activeViolations">0</div>
+                  <div class="stat-label-small">Active Violations</div>
+              </div>
+              <div class="stat-card-small">
+                  <div class="stat-number-small" id="resolvedViolations">0</div>
+                  <div class="stat-label-small">Resolved Violations</div>
+              </div>
+              <div class="stat-card-small">
+                  <div class="stat-number-small" id="majorViolations">0</div>
+                  <div class="stat-label-small">Major Violations</div>
+              </div>
+          </div>
+
           <div class="content-card">
-              <div class="content-title">Active Violations</div>
-              <div class="search-bar">
-                  <input type="text" class="search-input" placeholder="Search violations by student name or type...">
+              <div class="content-title">Active Violations Management</div>
+              
+              <!-- Filters -->
+              <div class="filters-section">
+                  <div class="filter-group">
+                      <label>Search</label>
+                      <input type="text" id="searchInput" placeholder="Search violations...">
+                  </div>
+                  <div class="filter-group">
+                      <label>Status</label>
+                      <select id="statusFilter">
+                          <option value="">All Statuses</option>
+                          <option value="Active">Active</option>
+                          <option value="Resolved">Resolved</option>
+                      </select>
+                  </div>
+                  <div class="filter-group">
+                      <label>Actions</label>
+                      <button class="btn btn-primary" onclick="refreshViolations()">🔄 Refresh</button>
+                  </div>
               </div>
+
               <div class="content-section">
-                  <table class="data-table">
-                      <thead>
-                          <tr>
-                              <th>Date</th>
-                              <th>Student</th>
-                              <th>Violation Type</th>
-                              <th>Description</th>
-                              <th>Status</th>
-                              <th>Actions</th>
-                          </tr>
-                      </thead>
-                      <tbody>
-                          <tr>
-                              <td>2024-08-16</td>
-                              <td>Jane Smith (2023-002)</td>
-                              <td>Uniform</td>
-                              <td>Improper uniform attire</td>
-                              <td><span class="status-badge status-pending">Pending</span></td>
-                              <td>
-                                  <button class="btn btn-primary">Review</button>
-                                  <button class="btn btn-secondary">Resolve</button>
-                              </td>
-                          </tr>
-                          <tr>
-                              <td>2024-08-15</td>
-                              <td>Mark Davis (2023-005)</td>
-                              <td>Tardiness</td>
-                              <td>Late for morning class</td>
-                              <td><span class="status-badge status-resolved">Resolved</span></td>
-                              <td>
-                                  <button class="btn btn-primary">View</button>
-                              </td>
-                          </tr>
-                          <tr>
-                              <td>2024-08-15</td>
-                              <td>Lisa Brown (2023-006)</td>
-                              <td>Misconduct</td>
-                              <td>Disruptive behavior in library</td>
-                              <td><span class="status-badge status-pending">Pending</span></td>
-                              <td>
-                                  <button class="btn btn-primary">Review</button>
-                                  <button class="btn btn-secondary">Resolve</button>
-                              </td>
-                          </tr>
-                      </tbody>
-                  </table>
+                  <div id="violationsTableContainer">
+                      <table class="data-table" id="violationsTable">
+                          <thead>
+                              <tr>
+                                  <th>Date</th>
+                                  <th>Student</th>
+                                  <th>Violation Type</th>
+                                  <th>Category</th>
+                                  <th>Status</th>
+                                  <th>Actions</th>
+                              </tr>
+                          </thead>
+                          <tbody id="violationsTableBody">
+                              <?php while($row = $violations_result->fetch_assoc()): ?>
+                              <tr>
+                                  <td><?php echo date('M j, Y', strtotime($row['violation_date'])); ?></td>
+                                  <td><?php echo htmlspecialchars($row['student_name']) . ' (' . htmlspecialchars($row['student_id']) . ')'; ?></td>
+                                  <td><?php echo htmlspecialchars($row['violation_type']); ?></td>
+                                  <td>
+                                      <span class="status-badge status-<?php 
+                                          echo $row['violation_category'] == 'Minor' ? 'active' : 
+                                              ($row['violation_category'] == 'Serious' ? 'pending' : 'resolved'); 
+                                      ?>">
+                                          <?php echo htmlspecialchars($row['violation_category']); ?>
+                                      </span>
+                                  </td>
+                                  <td>
+                                      <span class="status-badge status-<?php echo $row['status'] == 'Active' ? 'pending' : 'resolved'; ?>">
+                                          <?php echo htmlspecialchars($row['status']); ?>
+                                      </span>
+                                  </td>
+                                  <td>
+                                      <div class="violation-actions">
+                                          <button class="btn-small btn-view" onclick="viewViolation(<?php echo $row['id']; ?>)">View</button>
+                                          <?php if($row['status'] == 'Active'): ?>
+                                              <button class="btn-small btn-resolve" onclick="resolveViolation(<?php echo $row['id']; ?>, '<?php echo htmlspecialchars($row['student_name']); ?>')">Resolve</button>
+                                          <?php endif; ?>
+                                      </div>
+                                  </td>
+                              </tr>
+                              <?php endwhile; ?>
+                          </tbody>
+                      </table>
+                  </div>
               </div>
+              
               <div class="action-buttons">
-                  <button class="btn btn-primary">Report New Violation</button>
-                  <button class="btn btn-secondary">Generate Report</button>
+                  <button class="btn btn-primary" onclick="openNewViolationModal()">➕ Report New Violation</button>
+                  <button class="btn btn-secondary" onclick="generateReport()">📊 Generate Report</button>
+                  <button class="btn btn-secondary" onclick="exportData()">📄 Export Data</button>
               </div>
+          </div>
+          
+          <!-- Report Section -->
+          <div class="report-section" id="reportSection" style="display: none;">
+              <div class="section-header">Violation Report</div>
+              <div id="reportContent"></div>
+          </div>
+      </div>
+  </div>
+
+  <!-- New Violation Modal -->
+  <div id="violationModal" class="violation-form-modal">
+      <div class="modal-content">
+          <div class="modal-header">
+              <h2 class="modal-title">Report New Violation</h2>
+              <button class="modal-close" onclick="closeViolationModal()">&times;</button>
+          </div>
+          
+          <form id="violationForm">
+              <div class="form-grid">
+                  <div class="form-group">
+                      <label for="studentId">Student ID</label>
+                      <input type="text" id="studentId" name="student_id" required>
+                  </div>
+                  
+                  <div class="form-group">
+                      <label for="violationCategory">Category</label>
+                      <select id="violationCategory" name="category" required>
+                          <option value="">Select Category</option>
+                          <option value="Minor">Minor Offense</option>
+                          <option value="Serious">Serious Offense</option>
+                          <option value="Major">Major Offense</option>
+                      </select>
+                  </div>
+              </div>
+              
+              <div class="form-group full-width">
+                  <label for="violationType">Violation Type</label>
+                  <input type="text" id="violationType" name="violation_type" required placeholder="Enter violation type">
+              </div>
+              
+              <div class="form-group full-width">
+                  <label for="violationDescription">Description</label>
+                  <textarea id="violationDescription" name="description" placeholder="Enter detailed description of the violation"></textarea>
+              </div>
+              
+              <div class="form-group full-width">
+                  <label for="recordedBy">Recorded By</label>
+                  <input type="text" id="recordedBy" name="recorded_by" required placeholder="Your name/position">
+              </div>
+          </form>
+          
+          <div class="modal-actions">
+              <button class="btn-modal btn-save" onclick="saveViolation()">Save Violation</button>
+              <button class="btn-modal btn-cancel" onclick="closeViolationModal()">Cancel</button>
+          </div>
+      </div>
+  </div>
+
+  <!-- View/Resolve Violation Modal -->
+  <div id="viewViolationModal" class="violation-form-modal">
+      <div class="modal-content">
+          <div class="modal-header">
+              <h2 class="modal-title">Violation Details</h2>
+              <button class="modal-close" onclick="closeViewModal()">&times;</button>
+          </div>
+          
+          <div id="violationDetails"></div>
+          
+          <div id="resolveSection" style="display: none;">
+              <div class="form-group">
+                  <label for="resolvedBy">Resolved By</label>
+                  <input type="text" id="resolvedBy" placeholder="Your name/position">
+              </div>
+              
+              <div class="form-group">
+                  <label for="resolutionNotes">Resolution Notes</label>
+                  <textarea id="resolutionNotes" placeholder="Enter resolution details"></textarea>
+              </div>
+          </div>
+          
+          <div class="modal-actions">
+              <button class="btn-modal btn-resolve" id="resolveBtn" onclick="confirmResolveViolation()" style="display: none;">Mark as Resolved</button>
+              <button class="btn-modal btn-cancel" onclick="closeViewModal()">Close</button>
           </div>
       </div>
   </div>
 
   <script>
-        // Navigation system
+        let currentViolations = [];
+        let currentViolationId = null;
+
+        // Initialize the application
+        document.addEventListener('DOMContentLoaded', function() {
+            loadInitialData();
+            setupEventListeners();
+        });
+
+        function setupEventListeners() {
+            // Search functionality
+            document.getElementById('searchInput').addEventListener('input', debounce(filterViolations, 300));
+            document.getElementById('statusFilter').addEventListener('change', filterViolations);
+        }
+
+        function debounce(func, wait) {
+            let timeout;
+            return function executedFunction(...args) {
+                const later = () => {
+                    clearTimeout(timeout);
+                    func(...args);
+                };
+                clearTimeout(timeout);
+                timeout = setTimeout(later, wait);
+            };
+        }
+
+        async function loadInitialData() {
+            await refreshViolations();
+            await updateStatistics();
+        }
+
+        async function refreshViolations() {
+            try {
+                const formData = new FormData();
+                formData.append('action', 'get_violations');
+                formData.append('search', document.getElementById('searchInput').value);
+                formData.append('status', document.getElementById('statusFilter').value);
+
+                const response = await fetch(window.location.href, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                currentViolations = await response.json();
+                renderViolationsTable(currentViolations);
+                
+            } catch (error) {
+                console.error('Error loading violations:', error);
+                alert('Error loading violations data');
+            }
+        }
+
+        function renderViolationsTable(violations) {
+            const tbody = document.getElementById('violationsTableBody');
+            tbody.innerHTML = '';
+
+            if (violations.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #64748b; padding: 40px;">No violations found</td></tr>';
+                return;
+            }
+
+            violations.forEach(violation => {
+                const row = document.createElement('tr');
+                
+                const categoryClass = violation.violation_category === 'Minor' ? 'active' : 
+                                    (violation.violation_category === 'Serious' ? 'pending' : 'resolved');
+                const statusClass = violation.status === 'Active' ? 'pending' : 'resolved';
+                
+                row.innerHTML = `
+                    <td>${new Date(violation.violation_date).toLocaleDateString('en-US', { 
+                        month: 'short', day: 'numeric', year: 'numeric' 
+                    })}</td>
+                    <td>${violation.student_name} (${violation.student_id})</td>
+                    <td>${violation.violation_type}</td>
+                    <td>
+                        <span class="status-badge status-${categoryClass}">
+                            ${violation.violation_category}
+                        </span>
+                    </td>
+                    <td>
+                        <span class="status-badge status-${statusClass}">
+                            ${violation.status}
+                        </span>
+                    </td>
+                    <td>
+                        <div class="violation-actions">
+                            <button class="btn-small btn-view" onclick="viewViolation(${violation.id})">View</button>
+                            ${violation.status === 'Active' ? 
+                                `<button class="btn-small btn-resolve" onclick="resolveViolation(${violation.id}, '${violation.student_name}')">Resolve</button>` : 
+                                ''
+                            }
+                        </div>
+                    </td>
+                `;
+                
+                tbody.appendChild(row);
+            });
+        }
+
+        function filterViolations() {
+            refreshViolations();
+        }
+
+        async function updateStatistics() {
+            try {
+                const formData = new FormData();
+                formData.append('action', 'get_report_data');
+                formData.append('start_date', new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split('T')[0]);
+                formData.append('end_date', new Date().toISOString().split('T')[0]);
+
+                const response = await fetch(window.location.href, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+                const stats = data.stats;
+
+                document.getElementById('totalViolations').textContent = stats.total_violations || 0;
+                document.getElementById('activeViolations').textContent = stats.active_violations || 0;
+                document.getElementById('resolvedViolations').textContent = stats.resolved_violations || 0;
+                document.getElementById('majorViolations').textContent = stats.major_violations || 0;
+
+            } catch (error) {
+                console.error('Error updating statistics:', error);
+            }
+        }
+
+        function openNewViolationModal() {
+            document.getElementById('violationModal').classList.add('show');
+            document.getElementById('violationForm').reset();
+        }
+
+        function closeViolationModal() {
+            document.getElementById('violationModal').classList.remove('show');
+        }
+
+        async function saveViolation() {
+            const form = document.getElementById('violationForm');
+            const formData = new FormData(form);
+            formData.append('action', 'add_violation');
+
+            try {
+                const response = await fetch(window.location.href, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    alert('✅ Violation recorded successfully!');
+                    closeViolationModal();
+                    refreshViolations();
+                    updateStatistics();
+                } else {
+                    alert('❌ Error recording violation');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('❌ Network error');
+            }
+        }
+
+        function viewViolation(violationId) {
+            const violation = currentViolations.find(v => v.id == violationId);
+            if (!violation) {
+                alert('Violation not found');
+                return;
+            }
+
+            const detailsHtml = `
+                <div style="margin-bottom: 20px;">
+                    <h3 style="color: #1e293b; margin-bottom: 15px;">Violation Information</h3>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                        <div><strong>Student:</strong> ${violation.student_name}</div>
+                        <div><strong>Student ID:</strong> ${violation.student_id}</div>
+                        <div><strong>Category:</strong> 
+                            <span class="status-badge status-${violation.violation_category === 'Minor' ? 'active' : 
+                                (violation.violation_category === 'Serious' ? 'pending' : 'resolved')}">
+                                ${violation.violation_category}
+                            </span>
+                        </div>
+                        <div><strong>Status:</strong> 
+                            <span class="status-badge status-${violation.status === 'Active' ? 'pending' : 'resolved'}">
+                                ${violation.status}
+                            </span>
+                        </div>
+                        <div><strong>Date:</strong> ${new Date(violation.violation_date).toLocaleString()}</div>
+                        <div><strong>Recorded By:</strong> ${violation.recorded_by || 'N/A'}</div>
+                    </div>
+                    <div style="margin-bottom: 15px;">
+                        <strong>Violation Type:</strong><br>
+                        ${violation.violation_type}
+                    </div>
+                    ${violation.notes ? `
+                        <div style="margin-bottom: 15px;">
+                            <strong>Notes:</strong><br>
+                            <div style="background: #f8fafc; padding: 10px; border-radius: 4px; white-space: pre-wrap;">
+                                ${violation.notes}
+                            </div>
+                        </div>
+                    ` : ''}
+                    ${violation.resolved_date ? `
+                        <div style="margin-bottom: 15px;">
+                            <strong>Resolved Date:</strong> ${new Date(violation.resolved_date).toLocaleString()}<br>
+                            <strong>Resolved By:</strong> ${violation.resolved_by || 'N/A'}
+                        </div>
+                    ` : ''}
+                </div>
+            `;
+
+            document.getElementById('violationDetails').innerHTML = detailsHtml;
+            
+            // Show resolve section if violation is active
+            const resolveSection = document.getElementById('resolveSection');
+            const resolveBtn = document.getElementById('resolveBtn');
+            
+            if (violation.status === 'Active') {
+                resolveSection.style.display = 'block';
+                resolveBtn.style.display = 'inline-block';
+                currentViolationId = violationId;
+            } else {
+                resolveSection.style.display = 'none';
+                resolveBtn.style.display = 'none';
+                currentViolationId = null;
+            }
+
+            document.getElementById('viewViolationModal').classList.add('show');
+        }
+
+        function closeViewModal() {
+            document.getElementById('viewViolationModal').classList.remove('show');
+            currentViolationId = null;
+        }
+
+        function resolveViolation(violationId, studentName) {
+            if (confirm(`Mark violation for ${studentName} as resolved?`)) {
+                viewViolation(violationId);
+            }
+        }
+
+        async function confirmResolveViolation() {
+            if (!currentViolationId) return;
+
+            const resolvedBy = document.getElementById('resolvedBy').value.trim();
+            const notes = document.getElementById('resolutionNotes').value.trim();
+
+            if (!resolvedBy) {
+                alert('Please enter who resolved this violation');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('action', 'resolve_violation');
+            formData.append('violation_id', currentViolationId);
+            formData.append('resolved_by', resolvedBy);
+            formData.append('notes', notes);
+
+            try {
+                const response = await fetch(window.location.href, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    alert('✅ Violation marked as resolved!');
+                    closeViewModal();
+                    refreshViolations();
+                    updateStatistics();
+                } else {
+                    alert('❌ Error resolving violation');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('❌ Network error');
+            }
+        }
+
+        async function generateReport() {
+            try {
+                const startDate = prompt('Enter start date (YYYY-MM-DD):', new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split('T')[0]);
+                const endDate = prompt('Enter end date (YYYY-MM-DD):', new Date().toISOString().split('T')[0]);
+                
+                if (!startDate || !endDate) return;
+
+                const formData = new FormData();
+                formData.append('action', 'get_report_data');
+                formData.append('start_date', startDate);
+                formData.append('end_date', endDate);
+
+                const response = await fetch(window.location.href, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+                const stats = data.stats;
+                const topViolators = data.top_violators;
+
+                let reportHtml = `
+                    <h3>Violation Report (${startDate} to ${endDate})</h3>
+                    <div class="stats-cards" style="margin: 20px 0;">
+                        <div class="stat-card-small">
+                            <div class="stat-number-small">${stats.total_violations}</div>
+                            <div class="stat-label-small">Total Violations</div>
+                        </div>
+                        <div class="stat-card-small">
+                            <div class="stat-number-small">${stats.active_violations}</div>
+                            <div class="stat-label-small">Active</div>
+                        </div>
+                        <div class="stat-card-small">
+                            <div class="stat-number-small">${stats.resolved_violations}</div>
+                            <div class="stat-label-small">Resolved</div>
+                        </div>
+                    </div>
+                    
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 20px 0;">
+                        <div>
+                            <h4>Violations by Category</h4>
+                            <ul>
+                                <li>Minor: ${stats.minor_violations}</li>
+                                <li>Serious: ${stats.serious_violations}</li>
+                                <li>Major: ${stats.major_violations}</li>
+                            </ul>
+                        </div>
+                        <div>
+                            <h4>Top Violators</h4>
+                            <ol>
+                `;
+
+                topViolators.forEach(violator => {
+                    reportHtml += `<li>${violator.name} (${violator.student_id}) - ${violator.violation_count} violations</li>`;
+                });
+
+                reportHtml += `
+                            </ol>
+                        </div>
+                    </div>
+                `;
+
+                document.getElementById('reportContent').innerHTML = reportHtml;
+                document.getElementById('reportSection').style.display = 'block';
+                document.getElementById('reportSection').scrollIntoView({ behavior: 'smooth' });
+
+            } catch (error) {
+                console.error('Error generating report:', error);
+                alert('Error generating report');
+            }
+        }
+
+        function exportData() {
+            const csvData = [
+                ['Date', 'Student ID', 'Student Name', 'Violation Type', 'Category', 'Status', 'Recorded By']
+            ];
+
+            currentViolations.forEach(violation => {
+                csvData.push([
+                    new Date(violation.violation_date).toLocaleDateString(),
+                    violation.student_id,
+                    violation.student_name,
+                    violation.violation_type,
+                    violation.violation_category,
+                    violation.status,
+                    violation.recorded_by || ''
+                ]);
+            });
+
+            const csvContent = csvData.map(row => row.map(cell => `"${cell}"`).join(',')).join('\n');
+            const blob = new Blob([csvContent], { type: 'text/csv' });
+            const url = window.URL.createObjectURL(blob);
+            
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `violations_export_${new Date().toISOString().split('T')[0]}.csv`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+            
+            alert('✅ Data exported successfully!');
+        }
+
+        // Navigation system (existing code)
         function showPage(pageId) {
             document.querySelectorAll('.page').forEach(page => {
                 page.classList.remove('active');
@@ -173,14 +1086,6 @@
             });
         });
 
-        // Initialize the application when DOM is loaded
-        document.addEventListener('DOMContentLoaded', function() {
-            const activePage = document.querySelector('.page.active');
-            if (!activePage) {
-                showPage('dashboard');
-            }
-        });
-
         // Keyboard navigation
         document.addEventListener('keydown', function(e) {
             const menuItems = document.querySelectorAll('.menu-item');
@@ -191,7 +1096,7 @@
                 const nextItem = menuItems[currentIndex + 1];
                 const pageId = nextItem.getAttribute('data-page');
                 showPage(pageId);
-            } else if (e.key === 'ArrowUp' && currentIndex > 0) {
+                    } else if (e.key === 'ArrowUp' && currentIndex > 0) {
                 e.preventDefault();
                 const prevItem = menuItems[currentIndex - 1];
                 const pageId = prevItem.getAttribute('data-page');
