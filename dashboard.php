@@ -1,7 +1,110 @@
 <?php
 // dashboard.php
-// VIOTRACK System - Dashboard Page
+// VIOTRACK System - Enhanced Dashboard with Dynamic Calendar
 include 'db.php';
+
+// Handle appointment management actions
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $action = $_POST['action'] ?? '';
+    
+    if ($action === 'save_appointment') {
+        $appointment_id = $_POST['appointment_id'] ?? '';
+        $date = $_POST['date'];
+        $title = $_POST['title'];
+        $time = $_POST['time'];
+        $description = $_POST['description'];
+        $type = $_POST['type'];
+        $status = $_POST['status'] ?? 'pending';
+        
+        if (empty($appointment_id)) {
+            // Create new appointment
+            $sql = "INSERT INTO appointments (appointment_date, title, time, description, type, status) VALUES (?, ?, ?, ?, ?, ?)";
+            $stmt = $conn->prepare($sql);
+            $stmt->bind_param("ssssss", $date, $title, $time, $description, $type, $status);
+        } else {
+            // Update existing appointment
+            $sql = "UPDATE appointments SET appointment_date=?, title=?, time=?, description=?, type=?, status=? WHERE id=?";
+            $stmt = $conn->prepare($sql);
+            $stmt->bind_param("ssssssi", $date, $title, $time, $description, $type, $status, $appointment_id);
+        }
+        
+        if ($stmt->execute()) {
+            echo json_encode(['success' => true]);
+        } else {
+            echo json_encode(['success' => false, 'error' => $conn->error]);
+        }
+        exit;
+    }
+    
+    if ($action === 'delete_appointment') {
+        $appointment_id = $_POST['appointment_id'];
+        $sql = "DELETE FROM appointments WHERE id = ?";
+        $stmt = $conn->prepare($sql);
+        $stmt->bind_param("i", $appointment_id);
+        
+        if ($stmt->execute()) {
+            echo json_encode(['success' => true]);
+        } else {
+            echo json_encode(['success' => false, 'error' => $conn->error]);
+        }
+        exit;
+    }
+    
+    if ($action === 'mark_done') {
+        $appointment_id = $_POST['appointment_id'];
+        $sql = "UPDATE appointments SET status = 'done' WHERE id = ?";
+        $stmt = $conn->prepare($sql);
+        $stmt->bind_param("i", $appointment_id);
+        
+        if ($stmt->execute()) {
+            echo json_encode(['success' => true]);
+        } else {
+            echo json_encode(['success' => false, 'error' => $conn->error]);
+        }
+        exit;
+    }
+    
+    if ($action === 'schedule_meeting') {
+        $student_id = $_POST['student_id'];
+        $student_name = $_POST['student_name'];
+        $meeting_date = $_POST['meeting_date'];
+        $meeting_time = $_POST['meeting_time'];
+        $violation_count = $_POST['violation_count'] ?? 0;
+        
+        $title = "Meeting: " . $student_name;
+        $description = "Violation meeting with " . $student_name . " (" . $student_id . "). Current violations: " . $violation_count;
+        $type = 'violation_meeting';
+        $status = 'pending';
+        
+        $sql = "INSERT INTO appointments (appointment_date, title, time, description, type, status, student_id) VALUES (?, ?, ?, ?, ?, ?, ?)";
+        $stmt = $conn->prepare($sql);
+        $stmt->bind_param("sssssss", $meeting_date, $title, $meeting_time, $description, $type, $status, $student_id);
+        
+        if ($stmt->execute()) {
+            echo json_encode(['success' => true, 'appointment_id' => $conn->insert_id]);
+        } else {
+            echo json_encode(['success' => false, 'error' => $conn->error]);
+        }
+        exit;
+    }
+        $year = $_POST['year'] ?? date('Y');
+        $month = $_POST['month'] ?? date('m');
+        
+        $sql = "SELECT * FROM appointments WHERE YEAR(appointment_date) = ? AND MONTH(appointment_date) = ? ORDER BY appointment_date, time";
+        $stmt = $conn->prepare($sql);
+        $stmt->bind_param("ii", $year, $month);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        
+        $appointments = [];
+        while ($row = $result->fetch_assoc()) {
+            $appointments[$row['appointment_date']][] = $row;
+        }
+        
+        echo json_encode(['success' => true, 'appointments' => $appointments]);
+        exit;
+    }
+    
 
 // Get total students count from database
 $student_count_result = $conn->query("SELECT COUNT(*) as total FROM students");
@@ -10,19 +113,6 @@ $student_count = $student_count_result->fetch_assoc()['total'];
 // Get active violations count
 $active_violations_result = $conn->query("SELECT COUNT(*) as total FROM violations WHERE status = 'Active'");
 $active_violations_count = $active_violations_result->fetch_assoc()['total'];
-
-// Get violation statistics by category
-$violation_stats_query = "SELECT violation_category, COUNT(*) as count FROM violations WHERE status = 'Active' GROUP BY violation_category";
-$violation_stats_result = $conn->query($violation_stats_query);
-$violation_stats = [];
-while ($row = $violation_stats_result->fetch_assoc()) {
-    $violation_stats[$row['violation_category']] = $row['count'];
-}
-
-// Set default values if no violations exist
-$minor_count = isset($violation_stats['Minor']) ? $violation_stats['Minor'] : 0;
-$serious_count = isset($violation_stats['Serious']) ? $violation_stats['Serious'] : 0;
-$major_count = isset($violation_stats['Major']) ? $violation_stats['Major'] : 0;
 
 // Get recent activity (violations and attendance)
 $recent_activity_query = "
@@ -46,6 +136,9 @@ $recent_activity_query = "
     LIMIT 10";
 
 $recent_activity_result = $conn->query($recent_activity_query);
+
+// Create appointments table if it doesn't exist
+
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -53,8 +146,333 @@ $recent_activity_result = $conn->query($recent_activity_query);
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>VIOTRACK</title>
-     <link rel="stylesheet" href="styles.css">
-    
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        /* Modal Styles for Appointment Management */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+            backdrop-filter: blur(2px);
+        }
+        
+        .modal-content {
+            background-color: #ffffff;
+            margin: 5% auto;
+            padding: 30px;
+            border: none;
+            border-radius: 16px;
+            width: 500px;
+            max-width: 90%;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+            animation: modalSlideIn 0.3s ease-out;
+        }
+        
+        @keyframes modalSlideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-50px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .close {
+            color: #9ca3af;
+            float: right;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: color 0.3s ease;
+            line-height: 1;
+        }
+        
+        .close:hover {
+            color: #ef4444;
+            transform: scale(1.1);
+        }
+        
+        .modal-title {
+            color: #1e293b;
+            font-size: 24px;
+            font-weight: 700;
+            margin-bottom: 25px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #f1f5f9;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #374151;
+            font-size: 14px;
+        }
+        
+        .form-group input,
+        .form-group textarea,
+        .form-group select {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e5e7eb;
+            border-radius: 10px;
+            box-sizing: border-box;
+            font-size: 14px;
+            transition: all 0.3s ease;
+            background-color: #f9fafb;
+        }
+        
+        .form-group input:focus,
+        .form-group textarea:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #3b82f6;
+            background-color: #ffffff;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }
+        
+        .form-group textarea {
+            resize: vertical;
+            min-height: 80px;
+            font-family: inherit;
+        }
+        
+        .form-buttons {
+            display: flex;
+            gap: 12px;
+            margin-top: 25px;
+            padding-top: 20px;
+            border-top: 1px solid #e5e7eb;
+        }
+        
+        .btn-modal {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 14px;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 120px;
+            justify-content: center;
+        }
+        
+        .btn-save {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+        }
+        
+        .btn-save:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(16, 185, 129, 0.3);
+        }
+        
+        .btn-delete {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+            color: white;
+        }
+        
+        .btn-delete:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(239, 68, 68, 0.3);
+        }
+        
+        .btn-done {
+            background: linear-gradient(135deg, #059669 0%, #047857 100%);
+            color: white;
+        }
+        
+        .btn-done:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(5, 150, 105, 0.3);
+        }
+        
+        .btn-cancel {
+            background: #f3f4f6;
+            color: #6b7280;
+            border: 1px solid #d1d5db;
+        }
+        
+        .btn-cancel:hover {
+            background: #e5e7eb;
+            color: #4b5563;
+        }
+        
+        /* Enhanced Calendar Styles */
+        .calendar-table .appointment {
+            background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
+            color: #1d4ed8;
+            font-weight: 600;
+            position: relative;
+            cursor: pointer;
+        }
+        
+        .calendar-table .appointment:hover {
+            background: linear-gradient(135deg, #bfdbfe 0%, #93c5fd 100%);
+            transform: scale(1.02);
+        }
+        
+        .calendar-table .appointment.done {
+            background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
+            color: #065f46;
+        }
+        
+        .calendar-table .appointment.done:hover {
+            background: linear-gradient(135deg, #a7f3d0 0%, #6ee7b7 100%);
+        }
+        
+        .appointment-indicator {
+            position: absolute;
+            top: 4px;
+            right: 4px;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #ef4444;
+        }
+        
+        .appointment-indicator.done {
+            background: #10b981;
+        }
+        
+        .appointment-indicator.meeting {
+            background: #f59e0b;
+        }
+        
+        .appointment-count {
+            position: absolute;
+            bottom: 2px;
+            right: 4px;
+            font-size: 10px;
+            background: rgba(0, 0, 0, 0.1);
+            border-radius: 10px;
+            padding: 2px 6px;
+            color: #4b5563;
+        }
+        
+        /* Enhanced Tooltip */
+        .tooltip {
+            position: absolute;
+            background: linear-gradient(135deg, #1f2937 0%, #111827 100%);
+            color: white;
+            padding: 15px 20px;
+            border-radius: 12px;
+            font-size: 13px;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3), 0 10px 10px -5px rgba(0, 0, 0, 0.2);
+            z-index: 1000;
+            max-width: 300px;
+            opacity: 0;
+            transform: translateY(10px);
+            transition: all 0.3s ease;
+            pointer-events: none;
+        }
+        
+        .tooltip.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
+        
+        .tooltip::after {
+            content: '';
+            position: absolute;
+            top: -8px;
+            left: 50%;
+            transform: translateX(-50%);
+            border-left: 8px solid transparent;
+            border-right: 8px solid transparent;
+            border-bottom: 8px solid #1f2937;
+        }
+        
+        .tooltip-title {
+            font-weight: 700;
+            margin-bottom: 8px;
+            color: #fbbf24;
+            font-size: 15px;
+        }
+        
+        .tooltip-time {
+            font-size: 12px;
+            color: #d1d5db;
+            margin-bottom: 6px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        
+        .tooltip-description {
+            font-size: 12px;
+            color: #e5e7eb;
+            margin-bottom: 8px;
+            line-height: 1.4;
+        }
+        
+        .tooltip-status {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            padding: 3px 8px;
+            border-radius: 6px;
+            display: inline-block;
+        }
+        
+        .tooltip-status.pending {
+            background: rgba(251, 191, 36, 0.2);
+            color: #fbbf24;
+        }
+        
+        .tooltip-status.done {
+            background: rgba(16, 185, 129, 0.2);
+            color: #10b981;
+        }
+        
+        .tooltip-actions {
+            margin-top: 10px;
+            padding-top: 8px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            font-size: 11px;
+            color: #9ca3af;
+        }
+
+        /* Add New Appointment Button */
+        .add-appointment-btn {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+            color: white;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            box-shadow: 0 10px 20px rgba(59, 130, 246, 0.3);
+            transition: all 0.3s ease;
+            z-index: 999;
+        }
+        
+        .add-appointment-btn:hover {
+            transform: scale(1.1);
+            box-shadow: 0 15px 25px rgba(59, 130, 246, 0.4);
+        }
+    </style>
 </head>
 <body>
     <div class="menu-container">
@@ -111,7 +529,7 @@ $recent_activity_result = $conn->query($recent_activity_query);
             <a href="reports.php" class="menu-item" data-page="reports">
                 <div class="menu-icon">
                     <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
+                        <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2-2V7.5L14.5 2z"/>
                         <polyline points="14,2 14,8 20,8"/>
                         <line x1="16" y1="13" x2="8" y2="13"/>
                         <line x1="16" y1="17" x2="8" y2="17"/>
@@ -124,7 +542,6 @@ $recent_activity_result = $conn->query($recent_activity_query);
     </div>
 
     <div class="main-content">
-        <!-- Dashboard Page -->
         <div id="dashboard" class="page active">
             <h1 class="page-header">Dashboard</h1>
             
@@ -184,19 +601,19 @@ $recent_activity_result = $conn->query($recent_activity_query);
                 <div class="chart-section">
                     <div class="section-header">Violation Types</div>
                     <div style="display: flex; flex-direction: column; align-items: center;">
-                        <div class="donut-chart" id="violationChart"></div>
+                        <div class="donut-chart"></div>
                         <div class="legend">
                             <div class="legend-item">
                                 <div class="legend-color color-minor"></div>
-                                <span>Minor Offenses (<?php echo $minor_count; ?>)</span>
+                                <span>Minor Offenses</span>
                             </div>
                             <div class="legend-item">
                                 <div class="legend-color color-serious"></div>
-                                <span>Serious Offenses (<?php echo $serious_count; ?>)</span>
+                                <span>Serious Offenses</span>
                             </div>
                             <div class="legend-item">
                                 <div class="legend-color color-major"></div>
-                                <span>Major Offenses (<?php echo $major_count; ?>)</span>
+                                <span>Major Offenses</span>
                             </div>
                         </div>
                     </div>
@@ -234,91 +651,117 @@ $recent_activity_result = $conn->query($recent_activity_query);
         </div>
     </div>
 
-    <!-- Tooltip for calendar appointments -->
+    <!-- Enhanced Tooltip -->
     <div id="tooltip" class="tooltip">
         <div class="tooltip-title"></div>
         <div class="tooltip-time"></div>
         <div class="tooltip-description"></div>
+        <div class="tooltip-status"></div>
+        <div class="tooltip-actions">Click to edit • Right-click for options</div>
     </div>
 
-    <!-- External JavaScript -->
+    <!-- Appointment Modal -->
+    <div id="appointmentModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeAppointmentModal()">&times;</span>
+            <h2 class="modal-title">
+                <span id="modalIcon">📅</span>
+                <span id="modalTitle">Edit Appointment</span>
+            </h2>
+            <form id="appointmentForm">
+                <input type="hidden" id="appointmentId" name="appointment_id">
+                <input type="hidden" id="appointmentDate" name="date">
+                
+                <div class="form-group">
+                    <label for="appointmentTitle">Title:</label>
+                    <input type="text" id="appointmentTitle" name="title" required placeholder="Enter appointment title...">
+                </div>
+                
+                <div class="form-group">
+                    <label for="appointmentTime">Time:</label>
+                    <input type="time" id="appointmentTime" name="time" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="appointmentDescription">Description:</label>
+                    <textarea id="appointmentDescription" name="description" placeholder="Enter description..."></textarea>
+                </div>
+                
+                <div class="form-group">
+                    <label for="appointmentType">Type:</label>
+                    <select id="appointmentType" name="type">
+                        <option value="meeting">📅 Meeting</option>
+                        <option value="violation_meeting">⚠️ Violation Meeting</option>
+                        <option value="event">🎉 Event</option>
+                        <option value="academic">📚 Academic</option>
+                        <option value="holiday">🏖️ Holiday</option>
+                    </select>
+                </div>
+                
+                <div class="form-buttons">
+                    <button type="button" class="btn-modal btn-save" onclick="saveAppointment()">
+                        💾 Save
+                    </button>
+                    <button type="button" class="btn-modal btn-done" onclick="markAsDone()">
+                        ✅ Mark Done
+                    </button>
+                    <button type="button" class="btn-modal btn-delete" onclick="deleteAppointment()">
+                        🗑️ Delete
+                    </button>
+                    <button type="button" class="btn-modal btn-cancel" onclick="closeAppointmentModal()">
+                        ❌ Cancel
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Add Appointment Button -->
+    <button class="add-appointment-btn" onclick="openNewAppointmentModal()" title="Add New Appointment">
+        ➕
+    </button>
+
     <script>
-        // Violation statistics data from PHP
-        const violationStats = {
-            minor: <?php echo $minor_count; ?>,
-            serious: <?php echo $serious_count; ?>,
-            major: <?php echo $major_count; ?>
-        };
-
-        // Update donut chart based on actual data
-        function updateViolationChart() {
-            const chart = document.getElementById('violationChart');
-            const total = violationStats.minor + violationStats.serious + violationStats.major;
-            
-            if (total === 0) {
-                chart.style.background = '#e5e7eb';
-                return;
-            }
-            
-            const minorPercent = (violationStats.minor / total) * 100;
-            const seriousPercent = (violationStats.serious / total) * 100;
-            const majorPercent = (violationStats.major / total) * 100;
-            
-            const minorEnd = minorPercent;
-            const seriousEnd = minorPercent + seriousPercent;
-            const majorEnd = seriousEnd + majorPercent;
-            
-            chart.style.background = `conic-gradient(
-                #10b981 0% ${minorEnd}%, 
-                #f59e0b ${minorEnd}% ${seriousEnd}%, 
-                #ef4444 ${seriousEnd}% ${majorEnd}%,
-                #e5e7eb ${majorEnd}% 100%
-            )`;
-        }
-
-        // Calendar functionality
+        // Enhanced Calendar System with Database Integration
         class CalendarSystem {
             constructor() {
                 this.currentDate = new Date();
                 this.currentMonth = this.currentDate.getMonth();
                 this.currentYear = this.currentDate.getFullYear();
-                this.appointments = this.generateAppointments();
+                this.appointments = {};
                 this.tooltip = document.getElementById('tooltip');
+                this.selectedDate = null;
+                this.selectedAppointment = null;
                 
                 this.init();
             }
 
             init() {
-                this.render();
+                this.loadAppointments();
                 this.attachEventListeners();
             }
 
-            generateAppointments() {
-                return {
-                    '2024-01-15': { title: 'Parent-Teacher Conference', time: '2:00 PM', description: 'Annual meeting with parents' },
-                    '2024-01-22': { title: 'Academic Board Meeting', time: '10:00 AM', description: 'Monthly board review' },
-                    '2024-02-05': { title: 'Student Orientation', time: '9:00 AM', description: 'New student welcome program' },
-                    '2024-02-14': { title: 'Valentine\'s Day Event', time: '3:00 PM', description: 'Student activity day' },
-                    '2024-03-08': { title: 'Women\'s Day Celebration', time: '1:00 PM', description: 'Special assembly' },
-                    '2024-03-25': { title: 'Science Fair', time: '10:00 AM', description: 'Annual science exhibition' },
-                    '2024-04-10': { title: 'Spring Break Starts', time: 'All Day', description: 'School holiday begins' },
-                    '2024-04-18': { title: 'Easter Monday', time: 'All Day', description: 'Public holiday' },
-                    '2024-05-01': { title: 'Labor Day', time: 'All Day', description: 'National holiday' },
-                    '2024-05-15': { title: 'Sports Day', time: '8:00 AM', description: 'Annual athletics competition' },
-                    '2024-06-12': { title: 'Independence Day Program', time: '9:00 AM', description: 'National celebration' },
-                    '2024-06-30': { title: 'End of School Year', time: 'All Day', description: 'Final day of classes' },
-                    '2024-07-04': { title: 'Summer Program Begins', time: '8:00 AM', description: 'Optional summer classes' },
-                    '2024-07-20': { title: 'Teacher Training Workshop', time: '9:00 AM', description: 'Professional development' },
-                    '2024-08-15': { title: 'School Registration', time: '8:00 AM', description: 'New academic year enrollment' },
-                    '2024-08-28': { title: 'First Day of School', time: '7:00 AM', description: 'Academic year begins' },
-                    '2024-09-05': { title: 'Faculty Meeting', time: '3:00 PM', description: 'Monthly staff meeting' },
-                    '2024-09-21': { title: 'International Peace Day', time: '10:00 AM', description: 'Special assembly' },
-                    '2024-10-31': { title: 'Halloween Activities', time: '2:00 PM', description: 'Student costume party' },
-                    '2024-11-01': { title: 'All Saints\' Day', time: 'All Day', description: 'Public holiday' },
-                    '2024-11-15': { title: 'Mid-term Exams Begin', time: '8:00 AM', description: 'Examination period starts' },
-                    '2024-12-08': { title: 'Immaculate Conception', time: 'All Day', description: 'Religious holiday' },
-                    '2024-12-25': { title: 'Christmas Day', time: 'All Day', description: 'Christmas holiday' }
-                };
+            async loadAppointments() {
+                try {
+                    const formData = new FormData();
+                    formData.append('action', 'get_appointments');
+                    formData.append('year', this.currentYear);
+                    formData.append('month', this.currentMonth + 1);
+
+                    const response = await fetch(window.location.href, {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    const data = await response.json();
+                    if (data.success) {
+                        this.appointments = data.appointments;
+                        this.render();
+                    }
+                } catch (error) {
+                    console.error('Error loading appointments:', error);
+                    this.render(); // Render empty calendar
+                }
             }
 
             attachEventListeners() {
@@ -332,7 +775,7 @@ $recent_activity_result = $conn->query($recent_activity_query);
                     this.currentMonth = 11;
                     this.currentYear--;
                 }
-                this.render();
+                this.loadAppointments();
             }
 
             nextMonth() {
@@ -341,7 +784,7 @@ $recent_activity_result = $conn->query($recent_activity_query);
                     this.currentMonth = 0;
                     this.currentYear++;
                 }
-                this.render();
+                this.loadAppointments();
             }
 
             render() {
@@ -391,13 +834,40 @@ $recent_activity_result = $conn->query($recent_activity_query);
                             const dateKey = `${this.currentYear}-${String(this.currentMonth + 1).padStart(2, '0')}-${String(date).padStart(2, '0')}`;
                             
                             if (this.appointments[dateKey]) {
+                                const appointments = this.appointments[dateKey];
+                                const firstAppointment = appointments[0];
+                                
                                 cell.classList.add('appointment');
+                                if (firstAppointment.status === 'done') {
+                                    cell.classList.add('done');
+                                }
+                                
                                 const indicator = document.createElement('div');
                                 indicator.classList.add('appointment-indicator');
+                                if (firstAppointment.status === 'done') {
+                                    indicator.classList.add('done');
+                                } else if (firstAppointment.type === 'violation_meeting') {
+                                    indicator.classList.add('meeting');
+                                }
                                 cell.appendChild(indicator);
                                 
-                                this.addTooltipEvents(cell, this.appointments[dateKey]);
+                                // Show count if multiple appointments
+                                if (appointments.length > 1) {
+                                    const count = document.createElement('div');
+                                    count.classList.add('appointment-count');
+                                    count.textContent = appointments.length;
+                                    cell.appendChild(count);
+                                }
+                                
+                                this.addAppointmentEvents(cell, dateKey, appointments);
                             }
+                            
+                            // Add double-click to create new appointment
+                            cell.addEventListener('dblclick', () => {
+                                if (!cell.classList.contains('other-month')) {
+                                    this.openNewAppointmentModal(dateKey);
+                                }
+                            });
                             
                             date++;
                         }
@@ -411,9 +881,9 @@ $recent_activity_result = $conn->query($recent_activity_query);
                 }
             }
 
-            addTooltipEvents(cell, appointment) {
+            addAppointmentEvents(cell, dateKey, appointments) {
                 cell.addEventListener('mouseenter', (e) => {
-                    this.showTooltip(e, appointment);
+                    this.showTooltip(e, appointments);
                 });
 
                 cell.addEventListener('mouseleave', () => {
@@ -423,13 +893,33 @@ $recent_activity_result = $conn->query($recent_activity_query);
                 cell.addEventListener('mousemove', (e) => {
                     this.updateTooltipPosition(e);
                 });
+
+                cell.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this.openAppointmentModal(appointments[0], dateKey);
+                });
+
+                cell.addEventListener('contextmenu', (e) => {
+                    e.preventDefault();
+                    this.showContextMenu(e, appointments, dateKey);
+                });
             }
 
-            showTooltip(event, appointment) {
+            showTooltip(event, appointments) {
                 const tooltip = this.tooltip;
+                const appointment = appointments[0];
+                
                 tooltip.querySelector('.tooltip-title').textContent = appointment.title;
-                tooltip.querySelector('.tooltip-time').textContent = `Time: ${appointment.time}`;
-                tooltip.querySelector('.tooltip-description').textContent = appointment.description;
+                tooltip.querySelector('.tooltip-time').innerHTML = `⏰ ${appointment.time}`;
+                tooltip.querySelector('.tooltip-description').textContent = appointment.description || 'No description';
+                
+                const statusElement = tooltip.querySelector('.tooltip-status');
+                statusElement.textContent = appointment.status;
+                statusElement.className = `tooltip-status ${appointment.status}`;
+                
+                if (appointments.length > 1) {
+                    tooltip.querySelector('.tooltip-description').textContent += ` (+${appointments.length - 1} more)`;
+                }
                 
                 tooltip.classList.add('show');
                 this.updateTooltipPosition(event);
@@ -445,21 +935,244 @@ $recent_activity_result = $conn->query($recent_activity_query);
                 const viewportWidth = window.innerWidth;
                 const viewportHeight = window.innerHeight;
                 
-                let left = event.pageX + 10;
-                let top = event.pageY - rect.height - 10;
+                let left = event.pageX + 15;
+                let top = event.pageY - rect.height - 15;
                 
                 if (left + rect.width > viewportWidth) {
-                    left = event.pageX - rect.width - 10;
+                    left = event.pageX - rect.width - 15;
                 }
                 
                 if (top < 0) {
-                    top = event.pageY + 10;
+                    top = event.pageY + 15;
                 }
                 
                 tooltip.style.left = `${left}px`;
                 tooltip.style.top = `${top}px`;
             }
+
+            openAppointmentModal(appointment, dateKey) {
+                const modal = document.getElementById('appointmentModal');
+                const form = document.getElementById('appointmentForm');
+                
+                // Populate form
+                document.getElementById('appointmentId').value = appointment.id;
+                document.getElementById('appointmentDate').value = dateKey;
+                document.getElementById('appointmentTitle').value = appointment.title;
+                document.getElementById('appointmentTime').value = appointment.time;
+                document.getElementById('appointmentDescription').value = appointment.description || '';
+                document.getElementById('appointmentType').value = appointment.type;
+                
+                // Update modal title and icon
+                const typeIcons = {
+                    'meeting': '📅',
+                    'violation_meeting': '⚠️',
+                    'event': '🎉',
+                    'academic': '📚',
+                    'holiday': '🏖️'
+                };
+                
+                document.getElementById('modalIcon').textContent = typeIcons[appointment.type] || '📅';
+                document.getElementById('modalTitle').textContent = 'Edit Appointment';
+                
+                modal.style.display = 'block';
+                this.selectedAppointment = appointment;
+                this.selectedDate = dateKey;
+            }
+
+            openNewAppointmentModal(dateKey = null) {
+                const modal = document.getElementById('appointmentModal');
+                const form = document.getElementById('appointmentForm');
+                
+                // Clear form
+                form.reset();
+                document.getElementById('appointmentId').value = '';
+                
+                // Set date
+                if (dateKey) {
+                    document.getElementById('appointmentDate').value = dateKey;
+                } else {
+                    const today = new Date();
+                    const todayStr = today.getFullYear() + '-' + 
+                                  String(today.getMonth() + 1).padStart(2, '0') + '-' + 
+                                  String(today.getDate()).padStart(2, '0');
+                    document.getElementById('appointmentDate').value = todayStr;
+                }
+                
+                // Set default time
+                document.getElementById('appointmentTime').value = '09:00';
+                
+                // Update modal title
+                document.getElementById('modalIcon').textContent = '📅';
+                document.getElementById('modalTitle').textContent = 'New Appointment';
+                
+                modal.style.display = 'block';
+                this.selectedAppointment = null;
+                this.selectedDate = dateKey;
+            }
         }
+
+        // Modal Functions
+        function closeAppointmentModal() {
+            document.getElementById('appointmentModal').style.display = 'none';
+        }
+
+        function openNewAppointmentModal() {
+            calendar.openNewAppointmentModal();
+        }
+
+        async function saveAppointment() {
+            const form = document.getElementById('appointmentForm');
+            const formData = new FormData(form);
+            formData.append('action', 'save_appointment');
+            formData.append('status', 'pending');
+
+            try {
+                const response = await fetch(window.location.href, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    closeAppointmentModal();
+                    calendar.loadAppointments();
+                    showNotification('✅ Appointment saved successfully!', 'success');
+                } else {
+                    showNotification('❌ Error saving appointment: ' + (data.error || 'Unknown error'), 'error');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                showNotification('❌ Network error saving appointment', 'error');
+            }
+        }
+
+        async function deleteAppointment() {
+            const appointmentId = document.getElementById('appointmentId').value;
+            if (!appointmentId) {
+                showNotification('❌ No appointment selected', 'error');
+                return;
+            }
+
+            if (!confirm('Are you sure you want to delete this appointment?')) {
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('action', 'delete_appointment');
+            formData.append('appointment_id', appointmentId);
+
+            try {
+                const response = await fetch(window.location.href, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    closeAppointmentModal();
+                    calendar.loadAppointments();
+                    showNotification('✅ Appointment deleted successfully!', 'success');
+                } else {
+                    showNotification('❌ Error deleting appointment: ' + (data.error || 'Unknown error'), 'error');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                showNotification('❌ Network error deleting appointment', 'error');
+            }
+        }
+
+        async function markAsDone() {
+            const appointmentId = document.getElementById('appointmentId').value;
+            if (!appointmentId) {
+                showNotification('❌ No appointment selected', 'error');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('action', 'mark_done');
+            formData.append('appointment_id', appointmentId);
+
+            try {
+                const response = await fetch(window.location.href, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    closeAppointmentModal();
+                    calendar.loadAppointments();
+                    showNotification('✅ Appointment marked as done!', 'success');
+                } else {
+                    showNotification('❌ Error updating appointment: ' + (data.error || 'Unknown error'), 'error');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                showNotification('❌ Network error updating appointment', 'error');
+            }
+        }
+
+        // Notification system
+        function showNotification(message, type = 'info') {
+            const notification = document.createElement('div');
+            notification.style.cssText = `
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                padding: 15px 20px;
+                border-radius: 10px;
+                color: white;
+                font-weight: 600;
+                z-index: 10000;
+                animation: slideIn 0.3s ease-out;
+                max-width: 300px;
+                word-wrap: break-word;
+            `;
+
+            if (type === 'success') {
+                notification.style.background = 'linear-gradient(135deg, #10b981 0%, #059669 100%)';
+            } else if (type === 'error') {
+                notification.style.background = 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)';
+            } else {
+                notification.style.background = 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)';
+            }
+
+            notification.textContent = message;
+            document.body.appendChild(notification);
+
+            setTimeout(() => {
+                notification.style.animation = 'slideOut 0.3s ease-in';
+                setTimeout(() => {
+                    document.body.removeChild(notification);
+                }, 300);
+            }, 3000);
+        }
+
+        // Add CSS animations
+        const style = document.createElement('style');
+        style.textContent = `
+            @keyframes slideIn {
+                from {
+                    opacity: 0;
+                    transform: translateX(100%);
+                }
+                to {
+                    opacity: 1;
+                    transform: translateX(0);
+                }
+            }
+            @keyframes slideOut {
+                from {
+                    opacity: 1;
+                    transform: translateX(0);
+                }
+                to {
+                    opacity: 0;
+                    transform: translateX(100%);
+                }
+            }
+        `;
+        document.head.appendChild(style);
 
         // Navigation system
         function showPage(pageId) {
@@ -486,80 +1199,10 @@ $recent_activity_result = $conn->query($recent_activity_query);
             document.title = pageTitles[pageId] || 'PHC System';
         }
 
-        // Add click event listeners to menu items
-        document.querySelectorAll('.menu-item').forEach(item => {
-            item.addEventListener('click', function() {
-                const pageId = this.getAttribute('data-page');
-                if (pageId) {
-                    showPage(pageId);
-                    window.scrollTo({ top: 0, behavior: 'smooth' });
-                }
-            });
-        });
+        // Global calendar instance
+        let calendar;
 
-        // Auto-refresh functions
-        function refreshDashboardData() {
-            fetch('dashboard_api.php?action=get_stats')
-                .then(response => response.json())
-                .then(data => {
-                    // Update stats
-                    document.querySelector('.stat-card .stat-number').textContent = data.total_students.toLocaleString();
-                    document.querySelectorAll('.stat-card .stat-number')[1].textContent = data.active_violations.toLocaleString();
-                    
-                    // Update violation breakdown
-                    violationStats.minor = data.violation_breakdown.Minor;
-                    violationStats.serious = data.violation_breakdown.Serious;
-                    violationStats.major = data.violation_breakdown.Major;
-                    
-                    // Update legend with counts
-                    const legendItems = document.querySelectorAll('.legend-item span');
-                    legendItems[0].textContent = `Minor Offenses (${data.violation_breakdown.Minor})`;
-                    legendItems[1].textContent = `Serious Offenses (${data.violation_breakdown.Serious})`;
-                    legendItems[2].textContent = `Major Offenses (${data.violation_breakdown.Major})`;
-                    
-                    // Update chart
-                    updateViolationChart();
-                })
-                .catch(error => console.error('Error refreshing stats:', error));
-        }
-
-        function refreshRecentActivity() {
-            fetch('dashboard_api.php?action=get_recent_activity')
-                .then(response => response.json())
-                .then(data => {
-                    const tbody = document.querySelector('.activity-table tbody');
-                    tbody.innerHTML = '';
-                    
-                    if (data.length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: #64748b;">No recent activity</td></tr>';
-                        return;
-                    }
-                    
-                    data.forEach(activity => {
-                        const row = document.createElement('tr');
-                        
-                        // Determine status class
-                        let statusClass = 'pending';
-                        if (activity.type === 'violation') {
-                            statusClass = activity.status === 'Active' ? 'pending' : 'resolved';
-                        } else {
-                            statusClass = activity.status === 'Complete' ? 'active' : 'pending';
-                        }
-                        
-                        row.innerHTML = `
-                            <td>${activity.time}</td>
-                            <td>${activity.student_name} (${activity.student_id})</td>
-                            <td>${activity.activity}</td>
-                            <td><span class="status-badge status-${statusClass}">${activity.status}</span></td>
-                        `;
-                        
-                        tbody.appendChild(row);
-                    });
-                })
-                .catch(error => console.error('Error refreshing activity:', error));
-        }
-
-        // Initialize the application when DOM is loaded
+        // Initialize application
         document.addEventListener('DOMContentLoaded', function() {
             const activePage = document.querySelector('.page.active');
             if (!activePage) {
@@ -567,52 +1210,68 @@ $recent_activity_result = $conn->query($recent_activity_query);
             }
             
             // Initialize calendar
-            new CalendarSystem();
+            calendar = new CalendarSystem();
             
-            // Update violation chart
-            updateViolationChart();
-            
-            // Set up auto-refresh (every 30 seconds)
-            setInterval(refreshDashboardData, 30000);
-            setInterval(refreshRecentActivity, 15000);
-            
-            // Add manual refresh button functionality
-            const refreshBtn = document.createElement('button');
-            refreshBtn.textContent = '🔄 Refresh';
-            refreshBtn.className = 'btn btn-secondary';
-            refreshBtn.style.position = 'fixed';
-            refreshBtn.style.top = '20px';
-            refreshBtn.style.right = '20px';
-            refreshBtn.style.zIndex = '1001';
-            refreshBtn.addEventListener('click', function() {
-                refreshDashboardData();
-                refreshRecentActivity();
-                this.textContent = '✅ Updated';
-                setTimeout(() => {
-                    this.textContent = '🔄 Refresh';
-                }, 2000);
+            // Add click event listeners to menu items
+            document.querySelectorAll('.menu-item').forEach(item => {
+                item.addEventListener('click', function() {
+                    const pageId = this.getAttribute('data-page');
+                    if (pageId) {
+                        showPage(pageId);
+                        window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }
+                });
             });
-            document.body.appendChild(refreshBtn);
+
+            // Close modal when clicking outside
+            window.addEventListener('click', function(event) {
+                const modal = document.getElementById('appointmentModal');
+                if (event.target === modal) {
+                    closeAppointmentModal();
+                }
+            });
+
+            // Keyboard shortcuts
+            document.addEventListener('keydown', function(e) {
+                if (e.key === 'Escape') {
+                    closeAppointmentModal();
+                }
+                
+                // Navigation shortcuts
+                const menuItems = document.querySelectorAll('.menu-item');
+                const currentActive = document.querySelector('.menu-item.active');
+                const currentIndex = Array.from(menuItems).indexOf(currentActive);
+                
+                if (e.key === 'ArrowDown' && currentIndex < menuItems.length - 1) {
+                    e.preventDefault();
+                    const nextItem = menuItems[currentIndex + 1];
+                    const pageId = nextItem.getAttribute('data-page');
+                    showPage(pageId);
+                } else if (e.key === 'ArrowUp' && currentIndex > 0) {
+                    e.preventDefault();
+                    const prevItem = menuItems[currentIndex - 1];
+                    const pageId = prevItem.getAttribute('data-page');
+                    showPage(pageId);
+                }
+            });
         });
 
-        // Keyboard navigation
-        document.addEventListener('keydown', function(e) {
-            const menuItems = document.querySelectorAll('.menu-item');
-            const currentActive = document.querySelector('.menu-item.active');
-            const currentIndex = Array.from(menuItems).indexOf(currentActive);
+        // Function to add appointment from violations page
+        window.addViolationMeeting = function(studentName, studentId, violationCount) {
+            const today = new Date();
+            const dateStr = today.getFullYear() + '-' + 
+                          String(today.getMonth() + 1).padStart(2, '0') + '-' + 
+                          String(today.getDate()).padStart(2, '0');
             
-            if (e.key === 'ArrowDown' && currentIndex < menuItems.length - 1) {
-                e.preventDefault();
-                const nextItem = menuItems[currentIndex + 1];
-                const pageId = nextItem.getAttribute('data-page');
-                showPage(pageId);
-            } else if (e.key === 'ArrowUp' && currentIndex > 0) {
-                e.preventDefault();
-                const prevItem = menuItems[currentIndex - 1];
-                const pageId = prevItem.getAttribute('data-page');
-                showPage(pageId);
-            }
-        });
+            calendar.openNewAppointmentModal(dateStr);
+            
+            // Pre-fill form with violation meeting data
+            setTimeout(() => {
+                document.getElementById('appointmentTitle').value = `Meeting: ${studentName}`;
+                document.getElementById('appointmentDescription').value = `Violation meeting with ${studentName} (${studentId}). Current violations: ${violationCount}`;
+                document.getElementById('appointmentType').value = 'violation_meeting';
+            }, 100);
+        };
     </script>
 </body>
 </html>
